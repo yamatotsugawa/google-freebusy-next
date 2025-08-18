@@ -115,6 +115,7 @@ export default function FreeBusyFinder() {
   if (dayEnd.toMillis() <= dayStart.toMillis()) return [];
 
   // その日の稼働時間に重なる busy だけ抽出（null 安全 & 数値比較）
+  // その日の稼働時間に重なる busy だけ抽出（null 安全 & 数値比較）
   const overlaps = busyIntervals
     .filter((b) => {
       // b.start が null の場合は除外する
@@ -126,7 +127,7 @@ export default function FreeBusyFinder() {
       const bEndMs   = (b.end ?? b.start).toMillis(); // end が null の場合は start で代替
       return bEndMs > dayStart.toMillis() && bStartMs < dayEnd.toMillis();
     })
-    .sort((a, b) => a.start.toMillis() - b.start.toMillis());
+    .sort((a, b) => (a.start?.toMillis() ?? 0) - (b.start?.toMillis() ?? 0));
 
   const free: Interval[] = [];
   let cursor = dayStart;
