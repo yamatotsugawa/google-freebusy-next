@@ -117,6 +117,11 @@ export default function FreeBusyFinder() {
   // その日の稼働時間に重なる busy だけ抽出（null 安全 & 数値比較）
   const overlaps = busyIntervals
     .filter((b) => {
+      // b.start が null の場合は除外する
+      if (b.start === null) {
+          return false;
+      }
+      
       const bStartMs = b.start.toMillis();
       const bEndMs   = (b.end ?? b.start).toMillis(); // end が null の場合は start で代替
       return bEndMs > dayStart.toMillis() && bStartMs < dayEnd.toMillis();
