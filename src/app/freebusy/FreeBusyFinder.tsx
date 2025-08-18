@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { DateTime, Interval } from 'luxon';
+import { DateTime } from 'luxon';
 
 const TZ = 'Asia/Tokyo';
 const SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
@@ -30,10 +30,20 @@ declare global {
   }
 }
 
+/** LuxonのIntervalは使わず、null を含まない自前のスロット型で統一 */
+type Slot = { start: DateTime; end: DateTime };
+
+/** HH:mm → [hour, minute] */
+function parseHHmm(hhmm: string): [number, number] {
+  const [h, m] = hhmm.split(':').map((v) => Number(v));
+  return [isNaN(h) ? 0 : h, isNaN(m) ? 0 : m];
+}
+
 export default function FreeBusyFinder() {
   const [gisLoaded, setGisLoaded] = useState(false);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const tokenClientRef = useRef<TokenClient | null>(null);
+  const initDoneRef = useRef(false); // Token client 初期化の一度きりガード
 
   const today = useMemo(() => DateTime.now().setZone(TZ).startOf('day'), []);
   const [dateFrom, setDateFrom] = useState(today.plus({ days: 1 }).toISODate() || '');
@@ -46,7 +56,7 @@ export default function FreeBusyFinder() {
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // GIS を読み込み
+  // --- Google Identity Services スクリプト読込み ---
   useEffect(() => {
     const id = 'gis-script';
     if (document.getElementById(id)) {
@@ -63,9 +73,11 @@ export default function FreeBusyFinder() {
     document.head.appendChild(s);
   }, []);
 
-  // Token client 初期化
+  // --- Token client 初期化（依存配列は固定長に） ---
   useEffect(() => {
+    if (initDoneRef.current) return;
     if (!gisLoaded || !CLIENT_ID || tokenClientRef.current) return;
+
     const oauth2 = window.google?.accounts?.oauth2;
     if (!oauth2) return;
 
@@ -80,7 +92,11 @@ export default function FreeBusyFinder() {
         setAccessToken(resp.access_token ?? null);
       },
     });
-  }, [gisLoaded]);
+
+    initDoneRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gisLoaded]); // ← 必ず1つに固定（Fast Refresh で配列長が変わらないように）
+  // ------------------------------------------------
 
   const signIn = () => {
     setError(null);
@@ -91,6 +107,7 @@ export default function FreeBusyFinder() {
     tokenClientRef.current.requestAccessToken({ prompt: 'consent' });
   };
 
+  /** 期間（含む）の日付配列 */
   function buildDateRange(fromISO: string, toISO: string): DateTime[] {
     const start = DateTime.fromISO(fromISO, { zone: TZ }).startOf('day');
     const end = DateTime.fromISO(toISO, { zone: TZ }).startOf('day');
@@ -99,60 +116,55 @@ export default function FreeBusyFinder() {
     return days;
   }
 
+  /** 1日分の空きスロットを算出（返値は start/end を必ず持つ Slot[]） */
   function calcFreeWindowsForDay(
-  day: DateTime,
-  dayStartHHmm: string,
-  dayEndHHmm: string,
-  busyIntervals: Interval[],
-  minMins = 0
-): Interval[] {
-  const [sh, sm] = dayStartHHmm.split(':').map(Number);
-  const [eh, em] = dayEndHHmm.split(':').map(Number);
+    day: DateTime,
+    dayStartHHmm: string,
+    dayEndHHmm: string,
+    busy: Slot[],
+    minMins = 0
+  ): Slot[] {
+    const [sh, sm] = parseHHmm(dayStartHHmm);
+    const [eh, em] = parseHHmm(dayEndHHmm);
 
-  const dayStart = day.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
-  const dayEnd   = day.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
+    const dayStart = day.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
+    const dayEnd = day.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
+    if (dayEnd.toMillis() <= dayStart.toMillis()) return [];
 
-  if (dayEnd.toMillis() <= dayStart.toMillis()) return [];
+    // 当日稼働時間にかかる busy のみ抽出 → 開始でソート
+    const overlaps = busy
+      .map(({ start, end }) => {
+        const s = start <= end ? start : end;
+        const e = end >= start ? end : start;
+        return { start: s, end: e };
+      })
+      .filter(({ start, end }) => end.toMillis() > dayStart.toMillis() && start.toMillis() < dayEnd.toMillis())
+      .sort((a, b) => a.start.toMillis() - b.start.toMillis());
 
-  // ① start/end を必ず DateTime に正規化してから使う（nullを排除）
-  const norm = busyIntervals.map((b) => {
-    const s = (b.start ?? b.end ?? dayStart);
-    const e = (b.end   ?? b.start ?? dayEnd);
-    // 念のため s<=e になるよう並び替え
-    return s.toMillis() <= e.toMillis() ? { s, e } : { s: e, e: s };
-  });
+    const free: Slot[] = [];
+    let cursor = dayStart;
 
-  // ② 当日の稼働時間にかかるものだけ抽出 → 開始時刻でソート
-  const overlaps = norm
-    .filter(({ s, e }) => e.toMillis() > dayStart.toMillis() && s.toMillis() < dayEnd.toMillis())
-    .sort((a, b) => a.s.toMillis() - b.s.toMillis());
+    for (const { start, end } of overlaps) {
+      const bs = start < dayStart ? dayStart : start;
+      const be = end > dayEnd ? dayEnd : end;
 
-  // ③ 差分から空き時間を算出
-  const free: Interval[] = [];
-  let cursor = dayStart;
-
-  for (const { s, e } of overlaps) {
-    const bs = s.toMillis() < dayStart.toMillis() ? dayStart : s;
-    const be = e.toMillis() > dayEnd.toMillis()   ? dayEnd   : e;
-
-    if (bs.toMillis() > cursor.toMillis()) {
-      const slot = Interval.fromDateTimes(cursor, bs);
-      if (slot.length('minutes') >= minMins) free.push(slot);
+      if (bs.toMillis() > cursor.toMillis()) {
+        const dur = bs.diff(cursor, 'minutes').minutes;
+        if (dur >= minMins) free.push({ start: cursor, end: bs });
+      }
+      if (be.toMillis() > cursor.toMillis()) cursor = be;
     }
-    if (be.toMillis() > cursor.toMillis()) cursor = be;
+
+    if (cursor.toMillis() < dayEnd.toMillis()) {
+      const dur = dayEnd.diff(cursor, 'minutes').minutes;
+      if (dur >= minMins) free.push({ start: cursor, end: dayEnd });
+    }
+
+    return free;
   }
 
-  if (cursor.toMillis() < dayEnd.toMillis()) {
-    const tail = Interval.fromDateTimes(cursor, dayEnd);
-    if (tail.length('minutes') >= minMins) free.push(tail);
-  }
-
-  return free;
-}
-
-
-
-  async function fetchBusy(fromISO: string, toISO: string): Promise<Interval[]> {
+  /** Google FreeBusy API → busy を Slot[] に整形 */
+  async function fetchBusy(fromISO: string, toISO: string): Promise<Slot[]> {
     if (!accessToken) throw new Error('Googleにログインしてください。');
 
     const body = {
@@ -178,15 +190,13 @@ export default function FreeBusyFinder() {
     } = await res.json();
 
     const busy = data.calendars?.primary?.busy ?? [];
-    return busy.map(({ start, end }) =>
-      Interval.fromDateTimes(
-        DateTime.fromISO(start).setZone(TZ),
-        DateTime.fromISO(end).setZone(TZ)
-      )
-    );
+    return busy.map(({ start, end }) => ({
+      start: DateTime.fromISO(start, { zone: TZ }),
+      end: DateTime.fromISO(end, { zone: TZ }),
+    }));
   }
 
-  // ★ 2行まとめ表示（1行目: 日付 / 2行目: 時刻を横並び）
+  // 実行：日毎に「1行目=日付」「2行目=時刻」を出力
   const onRun = async () => {
     try {
       setError(null);
@@ -200,8 +210,10 @@ export default function FreeBusyFinder() {
       for (const day of days) {
         const wins = calcFreeWindowsForDay(day, startTime, endTime, busy, minSlotMins);
         if (wins.length === 0) continue;
+
         const dateLabel = day.toFormat('M月d日');
-        const ranges = wins.map((w) => `${w.start.toFormat('H:mm')}〜${w.end.toFormat('H:mm')}`);
+        const ranges = wins.map(({ start, end }) => `${start.toFormat('H:mm')}〜${end.toFormat('H:mm')}`);
+
         outputs.push(dateLabel);
         outputs.push(ranges.join('  '));
       }
