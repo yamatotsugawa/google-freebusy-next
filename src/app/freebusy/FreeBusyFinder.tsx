@@ -100,41 +100,56 @@ export default function FreeBusyFinder() {
   }
 
   function calcFreeWindowsForDay(
-    day: DateTime,
-    dayStartHHmm: string,
-    dayEndHHmm: string,
-    busyIntervals: Interval[],
-    minMins = 0
-  ): Interval[] {
-    const [sh, sm] = dayStartHHmm.split(':').map(Number);
-    const [eh, em] = dayEndHHmm.split(':').map(Number);
-    const dayStart = day.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
-    const dayEnd = day.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
-    if (dayEnd <= dayStart) return [];
+  day: DateTime,
+  dayStartHHmm: string,
+  dayEndHHmm: string,
+  busyIntervals: Interval[],
+  minMins = 0
+): Interval[] {
+  const [sh, sm] = dayStartHHmm.split(':').map(Number);
+  const [eh, em] = dayEndHHmm.split(':').map(Number);
 
-    const overlaps = busyIntervals
-      .filter((b) => b.end > dayStart && b.start < dayEnd)
-      .sort((a, b) => a.start.toMillis() - b.start.toMillis());
+  const dayStart = day.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
+  const dayEnd   = day.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
 
-    const free: Interval[] = [];
-    let cursor = dayStart;
+  if (dayEnd.toMillis() <= dayStart.toMillis()) return [];
 
-    for (const b of overlaps) {
-      const bs = b.start < dayStart ? dayStart : b.start;
-      const be = b.end > dayEnd ? dayEnd : b.end;
-      if (bs > cursor) {
-        const slot = Interval.fromDateTimes(cursor, bs);
-        if (slot.length('minutes') >= minMins) free.push(slot);
-      }
-      if (be > cursor) cursor = be;
+  // その日の稼働時間に重なる busy だけ抽出（null 安全 & 数値比較）
+  const overlaps = busyIntervals
+    .filter((b) => {
+      const bStartMs = b.start.toMillis();
+      const bEndMs   = (b.end ?? b.start).toMillis(); // end が null の場合は start で代替
+      return bEndMs > dayStart.toMillis() && bStartMs < dayEnd.toMillis();
+    })
+    .sort((a, b) => a.start.toMillis() - b.start.toMillis());
+
+  const free: Interval[] = [];
+  let cursor = dayStart;
+
+  for (const b of overlaps) {
+    const bStart = b.start;
+    const bEnd   = b.end ?? b.start; // 非 null に正規化
+
+    const bs = bStart.toMillis() < dayStart.toMillis() ? dayStart : bStart;
+    const be = bEnd.toMillis()   > dayEnd.toMillis()   ? dayEnd   : bEnd;
+
+    if (bs.toMillis() > cursor.toMillis()) {
+      const candidate = Interval.fromDateTimes(cursor, bs);
+      if (candidate.length('minutes') >= minMins) free.push(candidate);
     }
-
-    if (cursor < dayEnd) {
-      const tail = Interval.fromDateTimes(cursor, dayEnd);
-      if (tail.length('minutes') >= minMins) free.push(tail);
+    if (be.toMillis() > cursor.toMillis()) {
+      cursor = be;
     }
-    return free;
   }
+
+  if (cursor.toMillis() < dayEnd.toMillis()) {
+    const tail = Interval.fromDateTimes(cursor, dayEnd);
+    if (tail.length('minutes') >= minMins) free.push(tail);
+  }
+
+  return free;
+}
+
 
   async function fetchBusy(fromISO: string, toISO: string): Promise<Interval[]> {
     if (!accessToken) throw new Error('Googleにログインしてください。');
