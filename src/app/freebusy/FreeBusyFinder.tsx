@@ -114,38 +114,32 @@ export default function FreeBusyFinder() {
 
   if (dayEnd.toMillis() <= dayStart.toMillis()) return [];
 
-  // その日の稼働時間に重なる busy だけ抽出（null 安全 & 数値比較）
-  // その日の稼働時間に重なる busy だけ抽出（null 安全 & 数値比較）
-  const overlaps = busyIntervals
-    .filter((b) => {
-      // b.start が null の場合は除外する
-      if (b.start === null) {
-          return false;
-      }
-      
-      const bStartMs = b.start.toMillis();
-      const bEndMs   = (b.end ?? b.start).toMillis(); // end が null の場合は start で代替
-      return bEndMs > dayStart.toMillis() && bStartMs < dayEnd.toMillis();
-    })
-    .sort((a, b) => (a.start?.toMillis() ?? 0) - (b.start?.toMillis() ?? 0));
+  // ① start/end を必ず DateTime に正規化してから使う（nullを排除）
+  const norm = busyIntervals.map((b) => {
+    const s = (b.start ?? b.end ?? dayStart);
+    const e = (b.end   ?? b.start ?? dayEnd);
+    // 念のため s<=e になるよう並び替え
+    return s.toMillis() <= e.toMillis() ? { s, e } : { s: e, e: s };
+  });
 
+  // ② 当日の稼働時間にかかるものだけ抽出 → 開始時刻でソート
+  const overlaps = norm
+    .filter(({ s, e }) => e.toMillis() > dayStart.toMillis() && s.toMillis() < dayEnd.toMillis())
+    .sort((a, b) => a.s.toMillis() - b.s.toMillis());
+
+  // ③ 差分から空き時間を算出
   const free: Interval[] = [];
   let cursor = dayStart;
 
-  for (const b of overlaps) {
-    const bStart = b.start;
-    const bEnd   = b.end ?? b.start; // 非 null に正規化
-
-    const bs = bStart.toMillis() < dayStart.toMillis() ? dayStart : bStart;
-    const be = bEnd.toMillis()   > dayEnd.toMillis()   ? dayEnd   : bEnd;
+  for (const { s, e } of overlaps) {
+    const bs = s.toMillis() < dayStart.toMillis() ? dayStart : s;
+    const be = e.toMillis() > dayEnd.toMillis()   ? dayEnd   : e;
 
     if (bs.toMillis() > cursor.toMillis()) {
-      const candidate = Interval.fromDateTimes(cursor, bs);
-      if (candidate.length('minutes') >= minMins) free.push(candidate);
+      const slot = Interval.fromDateTimes(cursor, bs);
+      if (slot.length('minutes') >= minMins) free.push(slot);
     }
-    if (be.toMillis() > cursor.toMillis()) {
-      cursor = be;
-    }
+    if (be.toMillis() > cursor.toMillis()) cursor = be;
   }
 
   if (cursor.toMillis() < dayEnd.toMillis()) {
@@ -155,6 +149,7 @@ export default function FreeBusyFinder() {
 
   return free;
 }
+
 
 
   async function fetchBusy(fromISO: string, toISO: string): Promise<Interval[]> {
